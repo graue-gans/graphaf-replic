@@ -137,7 +137,7 @@ wheels = [
 ]
 
 [[package]]
-name = "graphaf"
+name = "graphaf-replic"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
