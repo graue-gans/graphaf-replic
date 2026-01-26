@@ -68,14 +68,14 @@ class RGCN(nn.Module):
 
 
 class GraphAF(nn.Module):
-    def __init__(self, max_nodes=48, d=9, b=3, embedding_dim=128):
+    def __init__(self, d=9, b=3, embedding_dim=128, batch_size=32, max_nodes=48):
         super(GraphAF, self).__init__()
 
-        # Dimensions
+        # Parameters
         self.d = d  # number of node types
         self.b = b  # number of edge types
         self.embedding_dim = embedding_dim
-        self.batch_size = 32
+        self.batch_size = batch_size
         self.N = max_nodes
 
         # Distributions; FIXME - naming
@@ -132,6 +132,7 @@ class GraphAF(nn.Module):
         )  # dim: batch x n x n
 
         loss = (torch.sum(loss_X) + torch.sum(loss_A)) / self.batch_size
+        return loss
 
     def _get_graph_embedding(self, H):
         """TODO - write docstring and confirm correctness."""
@@ -151,24 +152,26 @@ class GraphAF(nn.Module):
 
     def generate(self):
         with torch.no_grad():
-            # for loops needed here (before tensorization)
-            # how long does generation go? is there a stop point?
-            N = 100
-            for i in range(N):
-                H_i = self.rgcn(subgraph)  # dim: n x k
-                H_ii = H_i[i, :]  # dim: k
-                h_i = torch.sum(H_i, dim=0)  # dim: k
+            # Empty init; FIXME - check if this is the way to do it
+            X = torch.zeros(self.N, self.d)
+            A = torch.zeros(self.N, self.N, self.b + 1)
+
+            for i in range(self.N):
+                if i != 0:
+                    H_i = self.rgcn(X, A)  # dim: n x k
+                    H_ii = H_i[i, :]  # dim: k
+                    h_i = torch.sum(H_i, dim=0)  # dim: k
+                else:
+                    h_i = torch.zeros(self.embedding_dim)
 
                 epsilon_i = self.epsilon_node.sample()
                 z_i = epsilon_i * self.alpha_node(h_i) + self.mu_node(h_i)
-                x_i = F.one_hot(torch.argmax(z_i), num_classes=self.d)
+                X[i, :] = F.one_hot(torch.argmax(z_i), num_classes=self.d)  # dim: d
 
-                z_ij_vectors = []
                 for j in range(i - 1):
                     epsilon_ij = self.epsilon_edge.sample()
-                    edge_mlp_input = torch.cat((h_i, H_ii, H_i[j, :]), dim=0)
-                    z_ij_vectors[j] = epsilon_ij * self.alpha_edge(edge_mlp_input) + self.mu_edge(
+                    edge_mlp_input = torch.cat((h_i, H_ii, H_i[j, :]), dim=-1)  # dim: 3k
+                    z_ij = epsilon_ij * self.alpha_edge(edge_mlp_input) + self.mu_edge(
                         edge_mlp_input
                     )
-                z_ij = torch.cat(z_ij_vectors, dim=1)  # dim: b+1 x j
-                a_ij = F.one_hot(torch.argmax(z_ij, dim=0), num_classes=self.b + 1)
+                    A[i, j, :] = F.one_hot(torch.argmax(z_ij), num_classes=self.b + 1)
