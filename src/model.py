@@ -1,1 +1,174 @@
-import torchimport torch.nn as nnimport torch.nn.functional as Fclass MLP(nn.Module):    def __init__(self, input_size, hidden_size, output_size):        super(MLP, self).__init__()        self.fc1 = nn.Linear(input_size, hidden_size)        self.fc2 = nn.Linear(hidden_size, output_size)        self.tanh = nn.Tanh()    def forward(self, x):        x = self.fc1(x)        x = self.tanh(x)        x = self.fc2(x)        x = self.tanh(x)        return xclass RGCN(nn.Module):    def __init__(self, embedding_dim, b, L=3, agg=torch.sum):        super(RGCN, self).__init__()        self.embedding_dim = embedding_dim        self.b = b        self.L = L        self.agg = agg        self.weights = nn.ParameterList(            [nn.Parameter(torch.randn(self.embedding_dim, self.embedding_dim, self.b)) for i in range(self.L)]        )    def forward(self, graph):        self.X, self.A = graph        self.N = self.X.shape[0]        H_prev = self.X        for l in range(self.L):            W = self.weights[l]            tensor_list = []            for i in range(self.b):  # FIXME convert to tensor factorization                E_i = self.A[:, :, i] + torch.eye(self.N)  # dim: n x n                D_i = torch.sum(E_i, dim=1)  # degree vector                D_inv_sqrt = torch.diag(torch.pow(D_i, -0.5))  # dim: n x n                z = F.ReLu(D_inv_sqrt @ E_i @ D_inv_sqrt @ H_prev @ W[:, :, i])  # dim: n x k                tensor_list.append(z)            Z = torch.stack(tensor_list, dim=2)  # dim: n x k x b            H = self.agg(Z, dim=2)  # dim: n x k            H_prev = H        return Hclass GraphAF(nn.Module):    def __init__(self):        super(GraphAF, self).__init__()        # dimensions        embedding_dim = 128        d = 8  # number of node types; FIXME dummy value        b = 3  # number of edge types; FIXME confirm value        # MLPs        # FIXME hidden dim not known        # FIXME edge mlp input dim not known        self.mu_node = MLP(embedding_dim, 2 * embedding_dim, d)        self.alpha_node = MLP(embedding_dim, 2 * embedding_dim, d)        self.mu_edge = MLP(3 * embedding_dim, 2 * 3 * embedding_dim, b + 1)        self.alpha_edge = MLP(3 * embedding_dim, 2 * 3 * embedding_dim, b + 1)        # R-GCN        self.rgcn = RGCN(embedding_dim, b)    def forward(self, graph):        pass    def generate(self, num_samples=1):        with torch.no_grad():            pass
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.distributions import MultivariateNormal
+
+
+class MLP(nn.Module):
+    """Base class for the node and edge MLPs using tanh nonlinearities."""
+
+    def __init__(self, input_size, hidden_size, output_size):
+        super(MLP, self).__init__()
+
+        self.fc1 = nn.Linear(input_size, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, output_size)
+        self.tanh = nn.Tanh()
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.tanh(x)
+        x = self.fc2(x)
+        x = self.tanh(x)
+        return x
+
+
+class RGCN(nn.Module):
+    """Relational Graph Convolutional Network (R-GCN) with autoregressive masking of the adjacency tensor."""
+
+    def __init__(self, d, embedding_dim, b, n_layers=3, agg=torch.sum):
+        super(RGCN, self).__init__()
+
+        self.embedding_dim = embedding_dim
+        self.b = b
+        self.n_layers = n_layers
+        self.agg = agg
+
+        # Initial embedding: d to k
+        self.input_projection = nn.Linear(d, embedding_dim)
+
+        self.weights = nn.ParameterList(
+            [
+                nn.Parameter(torch.randn(self.embedding_dim, self.embedding_dim, self.b))
+                for i in range(self.n_layers)
+            ]
+        )
+
+    def forward(self, X, A):
+        # Input:
+        #   - X, dim: batch_size x max_nodes x d
+        #   - A, dim: batch_size x max_nodes x max_nodes x b+1
+        H = self.input_projection(X)  # dim: batch_size x max_nodes x k
+        N = X.shape[1]
+        mask = torch.tril(torch.ones(N, N), diagonal=-1)
+
+        for layer in range(self.n_layers):
+            W = self.weights[layer]
+            tensor_list = []
+            for i in range(self.b + 1):  # FIXME could this be tensorized
+                E_i = A[:, :, :, i] * mask.unsqueeze(0)
+                E_i = E_i + torch.eye(N).unsqueeze(0)
+                D_i = torch.sum(E_i, dim=2)
+                D_inv_sqrt = torch.diag_embed(torch.pow(D_i, -0.5))
+                z = F.relu(D_inv_sqrt @ E_i @ D_inv_sqrt @ H @ W[:, :, i])
+                tensor_list.append(z)
+            Z = torch.stack(tensor_list, dim=3)  # dim: batch x n x k x b
+            H = self.agg(Z, dim=3)  # dim: batch x n x k
+
+        return H
+
+
+class GraphAF(nn.Module):
+    def __init__(self, max_nodes=48, d=9, b=3, embedding_dim=128):
+        super(GraphAF, self).__init__()
+
+        # Dimensions
+        self.d = d  # number of node types
+        self.b = b  # number of edge types
+        self.embedding_dim = embedding_dim
+        self.batch_size = 32
+        self.N = max_nodes
+
+        # Distributions; FIXME - naming
+        self.epsilon_node = MultivariateNormal(torch.zeros(d), torch.eye(d))
+        self.epsilon_edge = MultivariateNormal(torch.zeros(b + 1), torch.eye(b + 1))
+
+        # Node and Edge MLPs
+        self.mu_node = MLP(embedding_dim, 2 * embedding_dim, d)
+        self.alpha_node = MLP(embedding_dim, 2 * embedding_dim, d)
+        self.mu_edge = MLP(3 * embedding_dim, 2 * 3 * embedding_dim, b + 1)
+        self.alpha_edge = MLP(3 * embedding_dim, 2 * 3 * embedding_dim, b + 1)
+
+        # Autoregressive R-GCN
+        self.rgcn = RGCN(d, embedding_dim, b)
+
+    def forward(self, X, A):
+        # Input:
+        #   - X, dim: batch_size x max_nodes x d
+        #   - A, dim: batch_size x max_nodes x max_nodes x b+1
+
+        H = self.rgcn(X, A)  # dim: batch x n x k
+        h = self._get_graph_embedding(H)  # dim: batch x n x k
+
+        # --- Node part ---
+        z_X = X + torch.rand_like(X)
+        mu_X = self.mu_node(h)  # dim: batch x n x d
+        alpha_X = self.alpha_node(h)  # dim: batch x n x d
+        epsilon_X = (z_X - mu_X) / alpha_X  # dim: batch x n x d
+
+        loss_X = -torch.sum(self.epsilon_node.log_prob(epsilon_X), dim=-1) - torch.log(
+            torch.prod(alpha_X, dim=-1)
+        )  # dim: batch x n
+
+        # --- Edge part ---
+        z_A = A + torch.rand_like(A)
+
+        # Expand h for all (i,j) pairs
+        h_i = h.unsqueeze(2).expand(
+            self.batch_size, self.N, self.N, self.embedding_dim
+        )  # [batch, n, n, k]
+        # h_i[:, i, j, :] = h[:, i, :] (graph embedding when generating node i)
+        # Node embeddings for pairs
+        H_ii = H.unsqueeze(2).expand(self.batch_size, self.N, self.N, self.embedding_dim)  # Node i
+        H_ij = H.unsqueeze(1).expand(self.batch_size, self.N, self.N, self.embedding_dim)  # Node j
+        # Concatenate: (h_i, H_ii, H_ij)
+        edge_features = torch.cat([h_i, H_ii, H_ij], dim=-1)  # [batch, n, n, 3*k]
+
+        mu_A = self.mu_edge(edge_features)  # dim: batch x n x n x b+1
+        alpha_A = self.alpha_edge(edge_features)  # dim: batch x n x n x b+1
+        epsilon_A = (z_A - mu_A) / alpha_A  # FIXME - div by zero possibility
+
+        loss_A = -torch.sum(self.epsilon_node.log_prob(epsilon_A), dim=-1) - torch.log(
+            torch.prod(alpha_A, dim=-1)
+        )  # dim: batch x n x n
+
+        loss = (torch.sum(loss_X) + torch.sum(loss_A)) / self.batch_size
+
+    def _get_graph_embedding(self, H):
+        """TODO - write docstring and confirm correctness."""
+
+        H_cumsum = torch.cumsum(H, dim=1)  # dim: batch x n x k
+        # h[:, i, :] = sum(H[:, :i+1, :])
+        # But we want sum up to (not including) node i for autoregressive property
+        # Shift by one position
+        h = torch.cat(
+            [
+                torch.zeros(self.batch_size, 1, self.embedding_dim, device=H.device),
+                H_cumsum[:, :-1, :],
+            ],
+            dim=1,
+        )  # dim: batch x n x k
+        return h
+
+    def generate(self):
+        with torch.no_grad():
+            # for loops needed here (before tensorization)
+            # how long does generation go? is there a stop point?
+            N = 100
+            for i in range(N):
+                H_i = self.rgcn(subgraph)  # dim: n x k
+                H_ii = H_i[i, :]  # dim: k
+                h_i = torch.sum(H_i, dim=0)  # dim: k
+
+                epsilon_i = self.epsilon_node.sample()
+                z_i = epsilon_i * self.alpha_node(h_i) + self.mu_node(h_i)
+                x_i = F.one_hot(torch.argmax(z_i), num_classes=self.d)
+
+                z_ij_vectors = []
+                for j in range(i - 1):
+                    epsilon_ij = self.epsilon_edge.sample()
+                    edge_mlp_input = torch.cat((h_i, H_ii, H_i[j, :]), dim=0)
+                    z_ij_vectors[j] = epsilon_ij * self.alpha_edge(edge_mlp_input) + self.mu_edge(
+                        edge_mlp_input
+                    )
+                z_ij = torch.cat(z_ij_vectors, dim=1)  # dim: b+1 x j
+                a_ij = F.one_hot(torch.argmax(z_ij, dim=0), num_classes=self.b + 1)
