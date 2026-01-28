@@ -13,28 +13,29 @@ from model import GraphAF
 
 
 def main():
-    # Setup
-    # if not torch.cuda.is_available():
-    #     raise RuntimeError("CUDA not available! This script requires GPU.")
+    # Get project root (parent of src/)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(script_dir)
 
-    # In train.py, replace device setup:
+    # Device setup
     if torch.cuda.is_available():
         device = torch.device("cuda")
         torch.backends.cudnn.benchmark = True
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.set_float32_matmul_precision("high")
-    else:
-        device = torch.device("cpu")
+        device_name = torch.cuda.get_device_name(0)
 
-    os.makedirs("checkpoints", exist_ok=True)
+    # Create directories
+    os.makedirs(os.path.join(project_root, "checkpoints"), exist_ok=True)
+    os.makedirs(os.path.join(project_root, "runs"), exist_ok=True)
 
     # TensorBoard writer
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    writer = SummaryWriter(f"runs/graphaf_{timestamp}")
+    writer = SummaryWriter(os.path.join(project_root, "runs", f"graphaf_{timestamp}"))
 
     # Log config to TensorBoard
     config = {
-        "gpu": torch.cuda.get_device_name(0),
+        "device": device_name,
         "epochs": 10,
         "batch_size": 32,
         "lr": 0.001,
@@ -56,7 +57,8 @@ def main():
     grad_clip = config["grad_clip"]
 
     # Dataset
-    dataset = ZINCDataset("data/250k_rndm_zinc_drugs_clean_3.csv")
+    dataset_path = os.path.join(project_root, "data", "250k_rndm_zinc_drugs_clean_3.csv")
+    dataset = ZINCDataset(dataset_path)
     writer.add_text("data/dataset_size", str(len(dataset)))
 
     # Data loader
@@ -134,18 +136,23 @@ def main():
             }
 
             # Save latest
-            torch.save(checkpoint, "checkpoints/graphaf_latest.pt")
+            torch.save(checkpoint, os.path.join(project_root, "checkpoints", "graphaf_latest.pt"))
 
             # Save best model
             if avg_epoch_loss < best_loss:
                 best_loss = avg_epoch_loss
-                torch.save(checkpoint, "checkpoints/graphaf_best.pt")
+                torch.save(
+                    checkpoint, os.path.join(project_root, "checkpoints", "graphaf_best.pt")
+                )
                 writer.add_text(
                     "checkpoints", f"New best at epoch {epoch + 1}: {avg_epoch_loss:.4f}"
                 )
 
             # Save periodic checkpoints
-            torch.save(checkpoint, f"checkpoints/graphaf_epoch_{epoch + 1}.pt")
+            torch.save(
+                checkpoint,
+                os.path.join(project_root, "checkpoints", f"graphaf_epoch_{epoch + 1}.pt"),
+            )
 
             # Clear cache
             if device.type == "cuda":
@@ -160,7 +167,7 @@ def main():
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
             },
-            "checkpoints/graphaf_interrupt.pt",
+            os.path.join(project_root, "checkpoints", "graphaf_interrupt.pt"),
         )
 
     except Exception as e:
@@ -171,7 +178,7 @@ def main():
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
             },
-            "checkpoints/graphaf_error.pt",
+            os.path.join(project_root, "checkpoints", "graphaf_error.pt"),
         )
         raise
 
