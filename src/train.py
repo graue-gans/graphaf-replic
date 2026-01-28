@@ -67,7 +67,7 @@ def main():
         batch_size=batch_size,
         shuffle=True,
         collate_fn=collate_graphs,
-        num_workers=4,
+        num_workers=0,
         pin_memory=True,
         persistent_workers=True,
     )
