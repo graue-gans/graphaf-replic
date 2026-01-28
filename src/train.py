@@ -69,7 +69,7 @@ def main():
         collate_fn=collate_graphs,
         num_workers=0,
         pin_memory=True,
-        persistent_workers=True,
+        persistent_workers=False,
     )
 
     # Training loop
