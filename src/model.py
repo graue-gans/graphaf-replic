@@ -16,11 +16,16 @@ class MLP(nn.Module):
         self.fc2 = nn.Linear(hidden_size, output_size)
         self.tanh = nn.Tanh()
 
+        # nn.init.xavier_uniform_(self.fc1.weight)
+        # nn.init.xavier_uniform_(self.fc2.weight)
+        # nn.init.zeros_(self.fc1.bias)
+        # nn.init.zeros_(self.fc2.bias)
+
     def forward(self, x):
         x = self.fc1(x)
         x = self.tanh(x)
         x = self.fc2(x)
-        x = self.tanh(x)
+        # no output activation as mu mlps are unbounded and alpha mlps positive
         return x
 
 
@@ -37,13 +42,21 @@ class RGCN(nn.Module):
 
         # Initial embedding: d to k
         self.input_projection = nn.Linear(d, embedding_dim)
+        # nn.init.xavier_uniform_(self.input_projection.weight)
+        # nn.init.zeros_(self.input_projection.bias)
 
         self.weights = nn.ParameterList(
             [
                 nn.Parameter(torch.randn(self.embedding_dim, self.embedding_dim, self.b + 1))
-                for i in range(self.n_layers)
+                for _ in range(self.n_layers)
             ]
         )
+
+        # Weight init
+        # for layer_weights in self.weights:
+        #     # Xavier/Glorot initialization for each edge type
+        #     for i in range(self.b + 1):
+        #         nn.init.xavier_uniform_(layer_weights[:, :, i])
 
     def forward(self, X, A):
         # Input:
@@ -51,16 +64,16 @@ class RGCN(nn.Module):
         #   - A, dim: batch_size x max_nodes x max_nodes x b+1
         H = self.input_projection(X)  # dim: batch_size x max_nodes x k
         N = X.shape[1]
-        mask = torch.tril(torch.ones(N, N), diagonal=-1)
+        mask = torch.tril(torch.ones(N, N, device=X.device), diagonal=-1)
 
         for layer in range(self.n_layers):
             W = self.weights[layer]
             tensor_list = []
             for i in range(self.b + 1):  # FIXME could this be tensorized
                 E_i = A[:, :, :, i] * mask.unsqueeze(0)
-                E_i = E_i + torch.eye(N).unsqueeze(0)
+                E_i = E_i + torch.eye(N, device=X.device).unsqueeze(0)
                 D_i = torch.sum(E_i, dim=2)
-                D_inv_sqrt = torch.diag_embed(torch.pow(D_i, -0.5))
+                D_inv_sqrt = torch.diag_embed(torch.pow(D_i + 1e-8, -0.5))
                 z = F.relu(D_inv_sqrt @ E_i @ D_inv_sqrt @ H @ W[:, :, i])
                 tensor_list.append(z)
             Z = torch.stack(tensor_list, dim=3)  # dim: batch x n x k x b
@@ -107,9 +120,9 @@ class GraphAF(nn.Module):
         alpha_X = F.softplus(self.alpha_node(h)) + 1e-8  # dim: batch x n x d
         epsilon_X = (z_X - mu_X) / alpha_X  # dim: batch x n x d
 
-        loss_X = -torch.sum(self.epsilon_node.log_prob(epsilon_X), dim=-1) - torch.log(
-            torch.prod(alpha_X, dim=-1)
-        )  # dim: batch x n
+        loss_X = 0.5 * torch.sum(epsilon_X**2, dim=-1) + torch.sum(
+            torch.log(alpha_X + 1e-8), dim=-1
+        )
 
         # --- Edge part ---
         z_A = A + torch.rand_like(A)
@@ -129,9 +142,9 @@ class GraphAF(nn.Module):
         alpha_A = F.softplus(self.alpha_edge(edge_features)) + 1e-8  # dim: batch x n x n x b+1
         epsilon_A = (z_A - mu_A) / alpha_A  # FIXME - div by zero possibility
 
-        loss_A = -torch.sum(self.epsilon_edge.log_prob(epsilon_A), dim=-1) - torch.log(
-            torch.prod(alpha_A, dim=-1)
-        )  # dim: batch x n x n
+        loss_A = 0.5 * torch.sum(epsilon_A**2, dim=-1) + torch.sum(
+            torch.log(alpha_A + 1e-8), dim=-1
+        )
 
         loss = (torch.sum(loss_X) + torch.sum(loss_A)) / batch_size
         return loss

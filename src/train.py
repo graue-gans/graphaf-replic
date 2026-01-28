@@ -14,15 +14,17 @@ from model import GraphAF
 
 def main():
     # Setup
-    if not torch.cuda.is_available():
-        raise RuntimeError("CUDA not available! This script requires GPU.")
+    # if not torch.cuda.is_available():
+    #     raise RuntimeError("CUDA not available! This script requires GPU.")
 
-    device = torch.device("cuda")
-
-    # GPU optimizations
-    torch.backends.cudnn.benchmark = True
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.set_float32_matmul_precision("high")
+    # In train.py, replace device setup:
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.set_float32_matmul_precision("high")
+    else:
+        device = torch.device("cpu")
 
     os.makedirs("checkpoints", exist_ok=True)
 
@@ -145,8 +147,9 @@ def main():
             # Save periodic checkpoints
             torch.save(checkpoint, f"checkpoints/graphaf_epoch_{epoch + 1}.pt")
 
-            # Clear GPU cache
-            torch.cuda.empty_cache()
+            # Clear cache
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
 
     except KeyboardInterrupt:
         writer.add_text("status", f"Training interrupted at epoch {epoch + 1}")

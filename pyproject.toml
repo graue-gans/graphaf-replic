@@ -9,6 +9,7 @@ dependencies = [
     "numpy>=2.4.1",
     "pandas>=3.0.0",
     "rdkit>=2025.9.3",
+    "tensorboard>=2.20.0",
     "torch>=2.9.1",
     "torchvision>=0.24.1",
 ]
