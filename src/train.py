@@ -9,6 +9,8 @@ from torch.utils.tensorboard import SummaryWriter
 from dataset import ZINCDataset, collate_graphs
 from model import GraphAF
 
+# pyright: reportPossiblyUnboundVariable=false
+
 
 def main():
     # Setup
@@ -147,10 +149,10 @@ def main():
             torch.cuda.empty_cache()
 
     except KeyboardInterrupt:
-        writer.add_text("status", f"Training interrupted at epoch {epoch + 1}")  # pyright: ignore
+        writer.add_text("status", f"Training interrupted at epoch {epoch + 1}")
         torch.save(
             {
-                "epoch": epoch,  # pyright: ignore
+                "epoch": epoch,
                 "global_step": global_step,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
@@ -159,10 +161,10 @@ def main():
         )
 
     except Exception as e:
-        writer.add_text("errors", f"Error at epoch {epoch + 1}: {str(e)}")  # pyright: ignore
+        writer.add_text("errors", f"Error at epoch {epoch + 1}: {str(e)}")
         torch.save(
             {
-                "epoch": epoch,  # pyright: ignore
+                "epoch": epoch,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
             },

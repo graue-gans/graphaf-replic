@@ -3,6 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import MultivariateNormal
 
+# pyright: reportPossiblyUnboundVariable=false
+
 
 class MLP(nn.Module):
     """Base class for the node and edge MLPs using tanh nonlinearities."""
@@ -173,10 +175,7 @@ class GraphAF(nn.Module):
 
                 for j in range(i):  # corrected from (i - 1)
                     epsilon_ij = self.epsilon_edge.sample()
-                    edge_mlp_input = torch.cat(
-                        (h_i, H_ii, H_i[j, :]),  # pyright: ignore
-                        dim=-1,
-                    )  # dim: 3k
+                    edge_mlp_input = torch.cat((h_i, H_ii, H_i[j, :]), dim=-1)  # dim: 3k
                     alpha_A = F.softplus(self.alpha_edge(edge_mlp_input)) + 1e-8
                     z_ij = epsilon_ij * alpha_A + self.mu_edge(edge_mlp_input)
                     A[i, j, :] = F.one_hot(torch.argmax(z_ij), num_classes=self.b + 1)
