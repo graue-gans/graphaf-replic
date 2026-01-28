@@ -8,7 +8,17 @@ class ZINCDataset(Dataset):
     def __init__(self, csv_file):
         self.df = pd.read_csv(csv_file)
 
-        self.atom_types = {"C": 0, "N": 1, "O": 2, "F": 3, "P": 4, "S": 5, "Cl": 6, "Br": 7, "I": 8}
+        self.atom_types = {
+            "C": 0,
+            "N": 1,
+            "O": 2,
+            "F": 3,
+            "P": 4,
+            "S": 5,
+            "Cl": 6,
+            "Br": 7,
+            "I": 8,
+        }
         self.d = len(self.atom_types)
         self.bond_types = {
             Chem.BondType.SINGLE: 0,
@@ -26,17 +36,16 @@ class ZINCDataset(Dataset):
             # Convert smiles to molecule
             mol = Chem.MolFromSmiles(smiles)
 
+            if mol is None:
+                print("Failed converting mol from smiles")
+                continue
+
             # Kekulize molecule
-            try:
-                Chem.Kekulize(mol, clearAromaticFlags=True)
-            except Exception as e:
-                print(f"Failed to kekulize {smiles}: {e}")
-                continue  # skip this molecule
+            Chem.Kekulize(mol, clearAromaticFlags=True)
 
             # Convert molecule to graph
-            if mol is not None:
-                graph = self._mol_to_graph(mol)
-                graphs.append(graph)
+            graph = self._mol_to_graph(mol)
+            graphs.append(graph)
 
         return graphs
 
@@ -47,25 +56,55 @@ class ZINCDataset(Dataset):
         """
         N = mol.GetNumAtoms()
 
-        # --- Feature matrix ---
-        # FIXME - N should be padded for batching but probably here but in the batching logic
-        X = torch.zeros((N, self.d), dtype=torch.int8)
-        # TODO - order with bfs
-        for i, atom in enumerate(mol.GetAtoms()):
-            idx = self.atom_types[atom.GetSymbol()]  # get index for element
-            X[i, idx] = 1
+        # Get BFS ordering
+        bfs_order = self._get_bfs_ordering(mol)
+        reorder_map = {old_idx: new_idx for new_idx, old_idx in enumerate(bfs_order)}
 
-        # ---- Adjacency tensor ----
-        A = torch.zeros((N, N, self.b + 1), dtype=torch.int8)
-        # ASSUME - bfs ordering
+        # Node features with BFS ordering
+        X = torch.zeros((N, self.d), dtype=torch.float32)
+        for new_idx, old_idx in enumerate(bfs_order):
+            atom = mol.GetAtomWithIdx(old_idx)
+            idx = self.atom_types[atom.GetSymbol()]
+            X[new_idx, idx] = 1.0
+
+        # Adjacency tensor
+        A = torch.zeros((N, N, self.b + 1), dtype=torch.float32)
+        A[:, :, self.b] = 1.0  # All positions are "no edge" initially
+
+        # Fill bonds with BFS reordering
         for bond in mol.GetBonds():
-            i = bond.GetBeginAtomIdx()
-            j = bond.GetEndAtomIdx()
+            i = reorder_map[bond.GetBeginAtomIdx()]
+            j = reorder_map[bond.GetEndAtomIdx()]
             idx = self.bond_types[bond.GetBondType()]
-            A[i, j, idx] = 1
-            A[j, i, idx] = 1
+
+            A[i, j, idx] = 1.0
+            A[j, i, idx] = 1.0
+            A[i, j, self.b] = 0.0  # Remove "no edge" marker
+            A[j, i, self.b] = 0.0
 
         return {"X": X, "A": A}
+
+    def _get_bfs_ordering(self, mol):
+        from collections import deque
+
+        N = mol.GetNumAtoms()
+        visited = [False] * N
+        bfs_order = []
+        queue = deque([0])
+        visited[0] = True
+
+        while queue:
+            atom_idx = queue.popleft()
+            bfs_order.append(atom_idx)
+
+            atom = mol.GetAtomWithIdx(atom_idx)
+            for neighbor in atom.GetNeighbors():
+                neighbor_idx = neighbor.GetIdx()
+                if not visited[neighbor_idx]:
+                    visited[neighbor_idx] = True
+                    queue.append(neighbor_idx)
+
+        return bfs_order
 
     def __len__(self):
         return len(self.graphs)

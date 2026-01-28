@@ -38,7 +38,7 @@ class RGCN(nn.Module):
 
         self.weights = nn.ParameterList(
             [
-                nn.Parameter(torch.randn(self.embedding_dim, self.embedding_dim, self.b))
+                nn.Parameter(torch.randn(self.embedding_dim, self.embedding_dim, self.b + 1))
                 for i in range(self.n_layers)
             ]
         )
@@ -68,14 +68,13 @@ class RGCN(nn.Module):
 
 
 class GraphAF(nn.Module):
-    def __init__(self, d=9, b=3, embedding_dim=128, batch_size=32, max_nodes=48):
+    def __init__(self, d=9, b=3, embedding_dim=128, max_nodes=48):
         super(GraphAF, self).__init__()
 
         # Parameters
         self.d = d  # number of node types
         self.b = b  # number of edge types
         self.embedding_dim = embedding_dim
-        self.batch_size = batch_size
         self.N = max_nodes
 
         # Distributions; FIXME - naming
@@ -95,14 +94,15 @@ class GraphAF(nn.Module):
         # Input:
         #   - X, dim: batch_size x max_nodes x d
         #   - A, dim: batch_size x max_nodes x max_nodes x b+1
+        batch_size = X.shape[0]
 
         H = self.rgcn(X, A)  # dim: batch x n x k
-        h = self._get_graph_embedding(H)  # dim: batch x n x k
+        h = self._get_graph_embedding(H, batch_size)  # dim: batch x n x k
 
         # --- Node part ---
         z_X = X + torch.rand_like(X)
         mu_X = self.mu_node(h)  # dim: batch x n x d
-        alpha_X = self.alpha_node(h)  # dim: batch x n x d
+        alpha_X = F.softplus(self.alpha_node(h)) + 1e-8  # dim: batch x n x d
         epsilon_X = (z_X - mu_X) / alpha_X  # dim: batch x n x d
 
         loss_X = -torch.sum(self.epsilon_node.log_prob(epsilon_X), dim=-1) - torch.log(
@@ -114,36 +114,37 @@ class GraphAF(nn.Module):
 
         # Expand h for all (i,j) pairs
         h_i = h.unsqueeze(2).expand(
-            self.batch_size, self.N, self.N, self.embedding_dim
+            batch_size, self.N, self.N, self.embedding_dim
         )  # [batch, n, n, k]
         # h_i[:, i, j, :] = h[:, i, :] (graph embedding when generating node i)
         # Node embeddings for pairs
-        H_ii = H.unsqueeze(2).expand(self.batch_size, self.N, self.N, self.embedding_dim)  # Node i
-        H_ij = H.unsqueeze(1).expand(self.batch_size, self.N, self.N, self.embedding_dim)  # Node j
+        H_ii = H.unsqueeze(2).expand(batch_size, self.N, self.N, self.embedding_dim)  # Node i
+        H_ij = H.unsqueeze(1).expand(batch_size, self.N, self.N, self.embedding_dim)  # Node j
         # Concatenate: (h_i, H_ii, H_ij)
         edge_features = torch.cat([h_i, H_ii, H_ij], dim=-1)  # [batch, n, n, 3*k]
 
         mu_A = self.mu_edge(edge_features)  # dim: batch x n x n x b+1
-        alpha_A = self.alpha_edge(edge_features)  # dim: batch x n x n x b+1
+        alpha_A = F.softplus(self.alpha_edge(edge_features)) + 1e-8  # dim: batch x n x n x b+1
         epsilon_A = (z_A - mu_A) / alpha_A  # FIXME - div by zero possibility
 
-        loss_A = -torch.sum(self.epsilon_node.log_prob(epsilon_A), dim=-1) - torch.log(
+        loss_A = -torch.sum(self.epsilon_edge.log_prob(epsilon_A), dim=-1) - torch.log(
             torch.prod(alpha_A, dim=-1)
         )  # dim: batch x n x n
 
-        loss = (torch.sum(loss_X) + torch.sum(loss_A)) / self.batch_size
+        loss = (torch.sum(loss_X) + torch.sum(loss_A)) / batch_size
         return loss
 
-    def _get_graph_embedding(self, H):
-        """TODO - write docstring and confirm correctness."""
-
+    def _get_graph_embedding(self, H, batch_size):
+        """
+        Compute graph embedding h_i for each node i.
+        h_i = sum(H[0:i]) represents the subgraph G_i containing nodes 0 to i-1.
+        For node 0, h_0 = 0 (empty graph).
+        """
         H_cumsum = torch.cumsum(H, dim=1)  # dim: batch x n x k
-        # h[:, i, :] = sum(H[:, :i+1, :])
-        # But we want sum up to (not including) node i for autoregressive property
-        # Shift by one position
+        # Shift right: h[i] = sum(H[0:i])
         h = torch.cat(
             [
-                torch.zeros(self.batch_size, 1, self.embedding_dim, device=H.device),
+                torch.zeros(batch_size, 1, self.embedding_dim, device=H.device),
                 H_cumsum[:, :-1, :],
             ],
             dim=1,
@@ -151,6 +152,7 @@ class GraphAF(nn.Module):
         return h
 
     def generate(self):
+        """TODO - add (1 x ...) batch dim for rgcn"""
         with torch.no_grad():
             # Empty init; FIXME - check if this is the way to do it
             X = torch.zeros(self.N, self.d)
@@ -165,13 +167,16 @@ class GraphAF(nn.Module):
                     h_i = torch.zeros(self.embedding_dim)
 
                 epsilon_i = self.epsilon_node.sample()
-                z_i = epsilon_i * self.alpha_node(h_i) + self.mu_node(h_i)
+                alpha_X = F.softplus(self.alpha_node(h_i)) + 1e-8
+                z_i = epsilon_i * alpha_X + self.mu_node(h_i)
                 X[i, :] = F.one_hot(torch.argmax(z_i), num_classes=self.d)  # dim: d
 
-                for j in range(i - 1):
+                for j in range(i):  # corrected from (i - 1)
                     epsilon_ij = self.epsilon_edge.sample()
-                    edge_mlp_input = torch.cat((h_i, H_ii, H_i[j, :]), dim=-1)  # dim: 3k
-                    z_ij = epsilon_ij * self.alpha_edge(edge_mlp_input) + self.mu_edge(
-                        edge_mlp_input
-                    )
+                    edge_mlp_input = torch.cat(
+                        (h_i, H_ii, H_i[j, :]),  # pyright: ignore
+                        dim=-1,
+                    )  # dim: 3k
+                    alpha_A = F.softplus(self.alpha_edge(edge_mlp_input)) + 1e-8
+                    z_ij = epsilon_ij * alpha_A + self.mu_edge(edge_mlp_input)
                     A[i, j, :] = F.one_hot(torch.argmax(z_ij), num_classes=self.b + 1)
