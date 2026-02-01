@@ -83,14 +83,13 @@ class RGCN(nn.Module):
 
 
 class GraphAF(nn.Module):
-    def __init__(self, d=9, b=3, embedding_dim=128, max_nodes=48):
+    def __init__(self, d=9, b=3, embedding_dim=128):
         super(GraphAF, self).__init__()
 
         # Parameters
         self.d = d  # number of node types
         self.b = b  # number of edge types
         self.embedding_dim = embedding_dim
-        self.N = max_nodes
 
         # Distributions; FIXME - naming
         self.epsilon_node = MultivariateNormal(torch.zeros(d), torch.eye(d))
@@ -110,6 +109,7 @@ class GraphAF(nn.Module):
         #   - X, dim: batch_size x max_nodes x d
         #   - A, dim: batch_size x max_nodes x max_nodes x b+1
         batch_size = X.shape[0]
+        N = X.shape[1]
 
         H = self.rgcn(X, A)  # dim: batch x n x k
         h = self._get_graph_embedding(H, batch_size)  # dim: batch x n x k
@@ -128,13 +128,11 @@ class GraphAF(nn.Module):
         z_A = A + torch.rand_like(A)
 
         # Expand h for all (i,j) pairs
-        h_i = h.unsqueeze(2).expand(
-            batch_size, self.N, self.N, self.embedding_dim
-        )  # [batch, n, n, k]
+        h_i = h.unsqueeze(2).expand(batch_size, N, N, self.embedding_dim)  # [batch, n, n, k]
         # h_i[:, i, j, :] = h[:, i, :] (graph embedding when generating node i)
         # Node embeddings for pairs
-        H_ii = H.unsqueeze(2).expand(batch_size, self.N, self.N, self.embedding_dim)  # Node i
-        H_ij = H.unsqueeze(1).expand(batch_size, self.N, self.N, self.embedding_dim)  # Node j
+        H_ii = H.unsqueeze(2).expand(batch_size, N, N, self.embedding_dim)  # Node i
+        H_ij = H.unsqueeze(1).expand(batch_size, N, N, self.embedding_dim)  # Node j
         # Concatenate: (h_i, H_ii, H_ij)
         edge_features = torch.cat([h_i, H_ii, H_ij], dim=-1)  # [batch, n, n, 3*k]
 
@@ -170,10 +168,11 @@ class GraphAF(nn.Module):
         """TODO - add (1 x ...) batch dim for rgcn"""
         with torch.no_grad():
             # Empty init; FIXME - check if this is the way to do it
-            X = torch.zeros(self.N, self.d)
-            A = torch.zeros(self.N, self.N, self.b + 1)
+            N = 48
+            X = torch.zeros(N, self.d)
+            A = torch.zeros(N, N, self.b + 1)
 
-            for i in range(self.N):
+            for i in range(N):
                 if i != 0:
                     H_i = self.rgcn(X, A)  # dim: n x k
                     H_ii = H_i[i, :]  # dim: k

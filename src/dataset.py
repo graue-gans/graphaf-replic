@@ -1,5 +1,3 @@
-import re
-
 import pandas as pd
 import torch
 from rdkit import Chem
@@ -153,8 +151,13 @@ class PolyInfoDataset(Dataset):
             # Remove asterisks
             monomer_smiles = str(smiles).strip().replace("*", "")
 
-            # Remove empty parentheses that result from removing *
-            monomer_smiles = re.sub(r"\(\)", "", monomer_smiles)
+            # Remove ALL empty parentheses (loop until none left)
+            while "()" in monomer_smiles:
+                monomer_smiles = monomer_smiles.replace("()", "")
+
+            # Remove empty brackets too
+            while "[]" in monomer_smiles:
+                monomer_smiles = monomer_smiles.replace("[]", "")
 
             if not monomer_smiles:
                 skipped += 1
@@ -166,8 +169,15 @@ class PolyInfoDataset(Dataset):
                     skipped += 1
                     continue
 
-                # Kekulize to convert aromatic bonds to single/double
-                Chem.Kekulize(mol, clearAromaticFlags=True)
+                # Only try to Kekulize if the molecule has aromatic atoms
+                try:
+                    has_aromatic = any(atom.GetIsAromatic() for atom in mol.GetAtoms())
+                    if has_aromatic:
+                        Chem.Kekulize(mol, clearAromaticFlags=True)
+                except Exception:
+                    # If kekulization fails, skip this molecule
+                    skipped += 1
+                    continue
 
             except Exception:
                 skipped += 1
@@ -189,6 +199,8 @@ class PolyInfoDataset(Dataset):
         Returns: dict with adjacency tensor A and node features X
         """
         N = mol.GetNumAtoms()
+        if N > 48:
+            return None
 
         # Get BFS ordering
         bfs_order = self._get_bfs_ordering(mol)
