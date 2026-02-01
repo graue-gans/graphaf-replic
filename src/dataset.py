@@ -1,3 +1,5 @@
+import re
+
 import pandas as pd
 import torch
 from rdkit import Chem
@@ -143,31 +145,42 @@ class PolyInfoDataset(Dataset):
         graphs = []
         skipped = 0
 
-        for smiles in self.df["SMILES"]:
-            # Remove asterisks (*) which mark polymerization points
-            monomer_smiles = smiles.replace("*", "")
-
-            # Convert SMILES to molecule
-            mol = Chem.MolFromSmiles(monomer_smiles)
-
-            if mol is None:
+        for smiles in self.df["smiles"]:
+            if pd.isna(smiles):
                 skipped += 1
                 continue
 
-            # Kekulize molecule
+            # Remove asterisks
+            monomer_smiles = str(smiles).strip().replace("*", "")
+
+            # Remove empty parentheses that result from removing *
+            monomer_smiles = re.sub(r"\(\)", "", monomer_smiles)
+
+            if not monomer_smiles:
+                skipped += 1
+                continue
+
             try:
+                mol = Chem.MolFromSmiles(monomer_smiles)
+                if mol is None:
+                    skipped += 1
+                    continue
+
+                # Kekulize to convert aromatic bonds to single/double
                 Chem.Kekulize(mol, clearAromaticFlags=True)
-            except:
+
+            except Exception:
                 skipped += 1
                 continue
 
-            # Convert molecule to graph
             graph = self._mol_to_graph(mol)
+            if graph is None:
+                skipped += 1
+                continue
+
             graphs.append(graph)
 
-        if skipped > 0:
-            print(f"Skipped {skipped} invalid polymer monomers")
-
+        print(f"Loaded {len(graphs)} polymer monomers, skipped {skipped} invalid entries")
         return graphs
 
     def _mol_to_graph(self, mol):
@@ -187,9 +200,7 @@ class PolyInfoDataset(Dataset):
             atom = mol.GetAtomWithIdx(old_idx)
             atom_symbol = atom.GetSymbol()
 
-            # Skip atoms not in our atom_types dictionary
             if atom_symbol not in self.atom_types:
-                print(f"Warning: Unknown atom type {atom_symbol}, skipping molecule")
                 return None
 
             idx = self.atom_types[atom_symbol]
@@ -197,7 +208,7 @@ class PolyInfoDataset(Dataset):
 
         # Adjacency tensor
         A = torch.zeros((N, N, self.b + 1), dtype=torch.float32)
-        A[:, :, self.b] = 1.0  # All positions are "no edge" initially
+        A[:, :, self.b] = 1.0
 
         # Fill bonds with BFS reordering
         for bond in mol.GetBonds():
@@ -205,15 +216,13 @@ class PolyInfoDataset(Dataset):
             j = reorder_map[bond.GetEndAtomIdx()]
             bond_type = bond.GetBondType()
 
-            # Skip bond types not in our dictionary
             if bond_type not in self.bond_types:
                 continue
 
             idx = self.bond_types[bond_type]
-
             A[i, j, idx] = 1.0
             A[j, i, idx] = 1.0
-            A[i, j, self.b] = 0.0  # Remove "no edge" marker
+            A[i, j, self.b] = 0.0
             A[j, i, self.b] = 0.0
 
         return {"X": X, "A": A}
