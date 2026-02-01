@@ -143,39 +143,51 @@ class PolyInfoDataset(Dataset):
         graphs = []
         skipped = 0
 
-        for smiles in self.df["SMILES"]:
+        for idx, smiles in enumerate(self.df["smiles"]):
             if pd.isna(smiles):
                 skipped += 1
                 continue
 
-            # Remove asterisks
-            monomer_smiles = str(smiles).strip().replace("*", "")
-
-            # Remove ALL empty parentheses (loop until none left)
-            while "()" in monomer_smiles:
-                monomer_smiles = monomer_smiles.replace("()", "")
-
-            # Remove empty brackets too
-            while "[]" in monomer_smiles:
-                monomer_smiles = monomer_smiles.replace("[]", "")
-
-            if not monomer_smiles:
-                skipped += 1
-                continue
-
             try:
-                mol = Chem.MolFromSmiles(monomer_smiles)
+                # Parse the original SMILES
+                mol = Chem.MolFromSmiles(str(smiles).strip())
                 if mol is None:
                     skipped += 1
                     continue
 
-                # Only try to Kekulize if the molecule has aromatic atoms
+                # Remove all dummy atoms (*) - these are attachment points in polymers
+                # [#0] matches atoms with atomic number 0 (dummy atoms)
+                dummy_pattern = Chem.MolFromSmarts("[#0]")
+                if mol.HasSubstructMatch(dummy_pattern):
+                    mol = Chem.DeleteSubstructs(mol, dummy_pattern)
+
+                # Regenerate SMILES to clean up any structural issues
+                # This automatically handles stereochemistry, empty branches, etc.
+                clean_smiles = Chem.MolToSmiles(mol)
+
+                # Re-parse the cleaned SMILES
+                mol = Chem.MolFromSmiles(clean_smiles)
+                if mol is None:
+                    skipped += 1
+                    continue
+
+                # Check if molecule is empty or too small
+                if mol.GetNumAtoms() == 0:
+                    skipped += 1
+                    continue
+
+                # Check size limit (pretrained model max is 48 atoms)
+                if mol.GetNumAtoms() > 48:
+                    skipped += 1
+                    continue
+
+                # Try to kekulize aromatic systems
                 try:
                     has_aromatic = any(atom.GetIsAromatic() for atom in mol.GetAtoms())
                     if has_aromatic:
                         Chem.Kekulize(mol, clearAromaticFlags=True)
-                except Exception:
-                    # If kekulization fails, skip this molecule
+                except:
+                    # Skip molecules that can't be kekulized
                     skipped += 1
                     continue
 
@@ -183,6 +195,7 @@ class PolyInfoDataset(Dataset):
                 skipped += 1
                 continue
 
+            # Convert to graph
             graph = self._mol_to_graph(mol)
             if graph is None:
                 skipped += 1
@@ -199,8 +212,6 @@ class PolyInfoDataset(Dataset):
         Returns: dict with adjacency tensor A and node features X
         """
         N = mol.GetNumAtoms()
-        if N > 48:
-            return None
 
         # Get BFS ordering
         bfs_order = self._get_bfs_ordering(mol)
