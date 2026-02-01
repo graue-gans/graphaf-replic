@@ -113,6 +113,140 @@ class ZINCDataset(Dataset):
         return self.graphs[idx]
 
 
+class PolyInfoDataset(Dataset):
+    def __init__(self, csv_file):
+        self.df = pd.read_csv(csv_file)
+
+        self.atom_types = {
+            "C": 0,
+            "N": 1,
+            "O": 2,
+            "F": 3,
+            "P": 4,
+            "S": 5,
+            "Cl": 6,
+            "Br": 7,
+            "I": 8,
+        }
+        self.d = len(self.atom_types)
+        self.bond_types = {
+            Chem.BondType.SINGLE: 0,
+            Chem.BondType.DOUBLE: 1,
+            Chem.BondType.TRIPLE: 2,
+        }
+        self.b = len(self.bond_types)
+
+        self.graphs = self._load_graphs()
+
+    def _load_graphs(self):
+        """Load and convert all polymer monomers from SMILES to graph format"""
+        graphs = []
+        skipped = 0
+
+        for smiles in self.df["smiles"]:
+            # Remove asterisks (*) which mark polymerization points
+            monomer_smiles = smiles.replace("*", "")
+
+            # Convert SMILES to molecule
+            mol = Chem.MolFromSmiles(monomer_smiles)
+
+            if mol is None:
+                skipped += 1
+                continue
+
+            # Kekulize molecule
+            try:
+                Chem.Kekulize(mol, clearAromaticFlags=True)
+            except:
+                skipped += 1
+                continue
+
+            # Convert molecule to graph
+            graph = self._mol_to_graph(mol)
+            graphs.append(graph)
+
+        if skipped > 0:
+            print(f"Skipped {skipped} invalid polymer monomers")
+
+        return graphs
+
+    def _mol_to_graph(self, mol):
+        """
+        Convert RDKit molecule to graph representation
+        Returns: dict with adjacency tensor A and node features X
+        """
+        N = mol.GetNumAtoms()
+
+        # Get BFS ordering
+        bfs_order = self._get_bfs_ordering(mol)
+        reorder_map = {old_idx: new_idx for new_idx, old_idx in enumerate(bfs_order)}
+
+        # Node features with BFS ordering
+        X = torch.zeros((N, self.d), dtype=torch.float32)
+        for new_idx, old_idx in enumerate(bfs_order):
+            atom = mol.GetAtomWithIdx(old_idx)
+            atom_symbol = atom.GetSymbol()
+
+            # Skip atoms not in our atom_types dictionary
+            if atom_symbol not in self.atom_types:
+                print(f"Warning: Unknown atom type {atom_symbol}, skipping molecule")
+                return None
+
+            idx = self.atom_types[atom_symbol]
+            X[new_idx, idx] = 1.0
+
+        # Adjacency tensor
+        A = torch.zeros((N, N, self.b + 1), dtype=torch.float32)
+        A[:, :, self.b] = 1.0  # All positions are "no edge" initially
+
+        # Fill bonds with BFS reordering
+        for bond in mol.GetBonds():
+            i = reorder_map[bond.GetBeginAtomIdx()]
+            j = reorder_map[bond.GetEndAtomIdx()]
+            bond_type = bond.GetBondType()
+
+            # Skip bond types not in our dictionary
+            if bond_type not in self.bond_types:
+                continue
+
+            idx = self.bond_types[bond_type]
+
+            A[i, j, idx] = 1.0
+            A[j, i, idx] = 1.0
+            A[i, j, self.b] = 0.0  # Remove "no edge" marker
+            A[j, i, self.b] = 0.0
+
+        return {"X": X, "A": A}
+
+    def _get_bfs_ordering(self, mol):
+        from collections import deque
+
+        N = mol.GetNumAtoms()
+        visited = [False] * N
+        bfs_order = []
+        queue = deque([0])
+        visited[0] = True
+
+        while queue:
+            atom_idx = queue.popleft()
+            bfs_order.append(atom_idx)
+
+            atom = mol.GetAtomWithIdx(atom_idx)
+            for neighbor in atom.GetNeighbors():
+                neighbor_idx = neighbor.GetIdx()
+                if not visited[neighbor_idx]:
+                    visited[neighbor_idx] = True
+                    queue.append(neighbor_idx)
+
+        return bfs_order
+
+    def __len__(self):
+        return len(self.graphs)
+
+    def __getitem__(self, idx):
+        return self.graphs[idx]
+
+
 def collate_graphs(batch):
     max_nodes = 48
     X_list = []
