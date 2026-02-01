@@ -143,7 +143,7 @@ class PolyInfoDataset(Dataset):
         graphs = []
         skipped = 0
 
-        for smiles in self.df["smiles"]:
+        for smiles in self.df["SMILES"]:
             # Remove asterisks (*) which mark polymerization points
             monomer_smiles = smiles.replace("*", "")
 
