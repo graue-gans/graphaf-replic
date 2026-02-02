@@ -164,30 +164,94 @@ class GraphAF(nn.Module):
         )  # dim: batch x n x k
         return h
 
-    def generate(self):
-        """TODO - add (1 x ...) batch dim for rgcn"""
+    def generate(self, max_resample=10):
+        """Generate a molecule with valency checking."""
+        VALENCY = {"C": 4, "N": 3, "O": 2, "F": 1, "P": 5, "S": 6, "Cl": 1, "Br": 1, "I": 1}
+        IDX_TO_ATOM = {0: "C", 1: "N", 2: "O", 3: "F", 4: "P", 5: "S", 6: "Cl", 7: "Br", 8: "I"}
+        BOND_ORDER = {0: 1, 1: 2, 2: 3, 3: 0}  # single, double, triple, no bond
+
+        device = next(self.parameters()).device
+
         with torch.no_grad():
-            # Empty init; FIXME - check if this is the way to do it
             N = 48
-            X = torch.zeros(N, self.d)
-            A = torch.zeros(N, N, self.b + 1)
+            X = torch.zeros(N, self.d, device=device)
+            A = torch.zeros(N, N, self.b + 1, device=device)
+            A[:, :, self.b] = 1.0  # Initialize all as "no edge"
+
+            valencies_used = [0] * N
 
             for i in range(N):
-                if i != 0:
-                    H_i = self.rgcn(X, A)  # dim: n x k
-                    H_ii = H_i[i, :]  # dim: k
-                    h_i = torch.sum(H_i, dim=0)  # dim: k
-                else:
-                    h_i = torch.zeros(self.embedding_dim)
+                # Add batch dimension
+                X_batch = X.unsqueeze(0)
+                A_batch = A.unsqueeze(0)
 
-                epsilon_i = self.epsilon_node.sample()
+                if i != 0:
+                    H = self.rgcn(X_batch, A_batch)  # (1, N, k)
+                    H = H.squeeze(0)  # (N, k)
+                    h_i = torch.sum(H[:i], dim=0)  # (k,)
+                    H_ii = H[i]  # (k,)
+                else:
+                    h_i = torch.zeros(self.embedding_dim, device=device)
+                    H = None
+
+                # Generate node
+                epsilon_i = self.epsilon_node.sample().to(device)
                 alpha_X = F.softplus(self.alpha_node(h_i)) + 1e-8
                 z_i = epsilon_i * alpha_X + self.mu_node(h_i)
-                X[i, :] = F.one_hot(torch.argmax(z_i), num_classes=self.d)  # dim: d
+                atom_type = torch.argmax(z_i).item()
+                X[i] = F.one_hot(
+                    torch.tensor(atom_type, device=device), num_classes=self.d
+                ).float()
 
-                for j in range(i):  # corrected from (i - 1)
-                    epsilon_ij = self.epsilon_edge.sample()
-                    edge_mlp_input = torch.cat((h_i, H_ii, H_i[j, :]), dim=-1)  # dim: 3k
+                max_valency_i = VALENCY[IDX_TO_ATOM[atom_type]]
+
+                # Generate edges to previous nodes
+                has_edge = False
+                for j in range(i):
+                    if H is None:
+                        continue
+
+                    edge_mlp_input = torch.cat((h_i, H_ii, H[j]), dim=-1)  # (3k,)
                     alpha_A = F.softplus(self.alpha_edge(edge_mlp_input)) + 1e-8
-                    z_ij = epsilon_ij * alpha_A + self.mu_edge(edge_mlp_input)
-                    A[i, j, :] = F.one_hot(torch.argmax(z_ij), num_classes=self.b + 1)
+                    mu_A = self.mu_edge(edge_mlp_input)
+
+                    atom_j_type = torch.argmax(X[j]).item()
+                    max_valency_j = VALENCY[IDX_TO_ATOM[atom_j_type]]
+
+                    # Sample and resample if valency violated
+                    for _ in range(max_resample):
+                        epsilon_ij = self.epsilon_edge.sample().to(device)
+                        z_ij = epsilon_ij * alpha_A + mu_A
+                        bond_idx = torch.argmax(z_ij).item()
+                        bond_order = BOND_ORDER[bond_idx]
+
+                        if (
+                            valencies_used[i] + bond_order <= max_valency_i
+                            and valencies_used[j] + bond_order <= max_valency_j
+                        ):
+                            break
+                    else:
+                        # Failed to find valid bond, use no bond
+                        bond_idx = self.b
+                        bond_order = 0
+
+                    A[i, j] = F.one_hot(
+                        torch.tensor(bond_idx, device=device), num_classes=self.b + 1
+                    ).float()
+                    A[j, i] = A[i, j]
+                    valencies_used[i] += bond_order
+                    valencies_used[j] += bond_order
+
+                    if bond_order > 0:
+                        has_edge = True
+
+                # Stop if no edge to previous subgraph (except first node)
+                if i > 0 and not has_edge:
+                    X[i] = 0
+                    A[i, :] = 0
+                    A[:, i] = 0
+                    A[i, :, self.b] = 1.0
+                    A[:, i, self.b] = 1.0
+                    break
+
+            return X, A
