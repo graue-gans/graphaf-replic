@@ -143,7 +143,7 @@ class PolyInfoDataset(Dataset):
         graphs = []
         skipped = 0
 
-        for idx, smiles in enumerate(self.df["smiles"]):
+        for idx, smiles in enumerate(self.df["SMILES"]):
             if pd.isna(smiles):
                 skipped += 1
                 continue
